@@ -24,6 +24,7 @@
             * [搭建步骤](#搭建步骤)
             * [常见问题](#常见问题)
         * [2.4.3 在 docker 客户机验证](#243-在-docker-客户机验证)
+        * [2.4.4 客户机 config.json](#244-客户机-configjson)
 * [3 Dockerfile 最佳实践](#3-dockerfile-最佳实践)
     * [3.1 Dockerfile 建议](#31-dockerfile-建议)
     * [3.2 编写 Dockerfile](#32-编写-dockerfile)
@@ -36,8 +37,19 @@
     * [6.1 Docker 容器故障致无法启动解决实例](#61-docker-容器故障致无法启动解决实例)
     * [6.2 启动容器失败](#62-启动容器失败)
     * [6.3 CentOS7 上运行容器挂载卷没有写入权限](#63-centos7-上运行容器挂载卷没有写入权限)
+    * [6.4 docker 修改 image 存储目录](#64-docker-修改-image-存储目录)
 * [7 原理](#7-原理)
     * [7.1 Docker 背后的内核知识](#71-docker-背后的内核知识)
+* [8 API](#8-api)
+    * [8.1 API 使用前准备](#81-api-使用前准备)
+    * [8.2 操作 docker API](#82-操作-docker-api)
+        * [8.2.1 imasge 列表](#821-imasge-列表)
+        * [8.2.2 容器列表](#822-容器列表)
+        * [8.2.3 容器创建](#823-容器创建)
+            * [8.2.3.1 端口映射](#8231-端口映射)
+            * [8.2.3.2 磁盘映射](#8232-磁盘映射)
+            * [8.2.3.3 指定 Entrypoint](#8233-指定-entrypoint)
+        * [8.2.4 容器操作](#824-容器操作)
 
 <!-- vim-markdown-toc -->
 
@@ -338,6 +350,43 @@ docker pull 192.168.1.52:5000/centos
 ```
 至此，私有仓库已 OK
 
+### 2.4.4 客户机 config.json
+
+路径：~/.docker/config.json
+
+config.json 是用于存储 docker registry 的认证信息
+```
+
+{
+	"auths": {
+		"harbor.xxx.com": {
+			"auth": "xxx"
+		}
+	}
+}
+
+```
+auth 后面的内容其实用户名密码的加密后的输出
+
+```
+// 加密
+echo -n "user:password" | base64
+
+// 解密
+echo -n "xxx" | base64 -d
+```
+
+> python
+```
+>>> import base64
+>>> base64.b64encode("user:password")
+'dXNlcjpwYXNzd29yZA=='
+>>> base64.b64decode("dXNlcjpwYXNzd29yZA==")
+'user:password'
+```
+
+
+
 # 3 Dockerfile 最佳实践
 
 ## 3.1 Dockerfile 建议
@@ -455,7 +504,7 @@ WARN[0000] You are running linux kernel version 2.6.32-431.el6.x86_64, which mig
 
 docker: relocation error: docker: symbol dm_task_get_info_with_deferred_remove, version Base not defined in file libdevmapper.so.1.02 with link time reference
 
-原因：是因为 libdevmapper 版本太旧，需要 update【yum install device-mapper-*】
+原因：是因为 libdevmapper 版本太旧，需要 update〖yum install device-mapper-*〗
 ```
 
 ## 5.2 Alpine Linux
@@ -514,6 +563,69 @@ Error: failed to start containers: zabbix
 
 之后执行：docker run -i -t -v /home/docs:/src waterchestnut/nodejs:0.12.0
 
+## 6.4 docker 修改 image 存储目录
+
+docker 安装好后默认 image 存储目录在 /var/lib/docker 目录下，但是通常这个目录挂载的空间很小，所以我们在安装好 docker 后要注意修改 image 存储目录
+
+> 查看当前目录
+```
+$ docker info
+Containers: 3
+Images: 33
+Storage Driver: devicemapper
+ Pool Name: docker-8:33-60817411-pool
+ Pool Blocksize: 65.54 kB
+ Backing Filesystem: extfs
+ Data file: /dev/loop2
+ Metadata file: /dev/loop3
+ Data Space Used: 984.4 MB
+ Data Space Total: 107.4 GB
+ Data Space Available: 106.4 GB
+ Metadata Space Used: 1.987 MB
+ Metadata Space Total: 2.147 GB
+ Metadata Space Available: 2.145 GB
+ Udev Sync Supported: true
+ Deferred Removal Enabled: false
+ Data loop file: /home/disk2/docker/devicemapper/devicemapper/data
+ Metadata loop file: /home/disk2/docker/devicemapper/devicemapper/metadata
+ Library Version: XXXXXX
+Execution Driver: native-0.2
+Logging Driver: json-file
+Kernel Version: 3.10.0_3-0-0-26
+Operating System: <unknown>
+CPUs: 48
+Total Memory: 125.5 GiB
+Name: HOSTNAME
+ID: XXXXX
+```
+当然我这个是修改后的，修改后为、/home/disk2/docker 目录下
+
+> 修改目录（配置文件 /etc/sysconfig/docker)
+```
+# /etc/sysconfig/docker
+#
+# Other arguments to pass to the docker daemon process
+# These will be parsed by the sysv initscript and appended
+# to the arguments list passed to docker -d
+
+other_args="--graph=/home/docker"
+DOCKER_CERT_PATH=/etc/docker
+
+# Resolves: rhbz#1176302 (docker issue #407)
+DOCKER_NOWARN_KERNEL_VERSION=1
+
+# Location used for temporary files, such as those created by
+# # docker load and build operations. Default is /var/lib/docker/tmp
+# # Can be overriden by setting the following environment variable.
+# # DOCKER_TMPDIR=/var/tmp
+```
+在配置文件中将 other_args 赋值为你想存储的目录，注意一定要带引号
+
+> 重启 docker
+```
+service docker restart
+```
+
 # 7 原理
 
 ## 7.1 Docker 背后的内核知识
@@ -525,3 +637,226 @@ Docker 通过 namespace 实现了资源隔离，通过 cgroups 实现了资源�
 > * Namespace：隔离技术的第一层，确保 Docker 容器内的进程看不到也影响不到 Docker 外部的进程。
 > * Control Groups：LXC 技术的关键组件，用于进行运行时的资源限制。
 > * UnionFS（文件系统）：容器的构件块，创建抽象层，从而实现 Docker 的轻量级和运行快速的特性
+
+# 8 API
+
+## 8.1 API 使用前准备
+```
+OS: Centos8.4
+Docker: 24.0.5
+```
+
+> /usr/lib/systemd/system/docker.service
+```
+[Unit]
+Description=Docker Application Container Engine
+Documentation=https://docs.docker.com
+After=network-online.target docker.socket firewalld.service containerd.service time-set.target
+Wants=network-online.target containerd.service
+Requires=docker.socket
+
+[Service]
+Type=notify
+# the default is not to use systemd for cgroups because the delegate issues still
+# exists and systemd currently does not support the cgroup feature set required
+# for containers run by docker
+ExecStart=/usr/bin/dockerd -H fd:// --containerd=/run/containerd/containerd.sock
+ExecReload=/bin/kill -s HUP $MAINPID
+TimeoutStartSec=0
+RestartSec=2
+Restart=always
+
+# Note that StartLimit* options were moved from "Service" to "Unit" in systemd 229.
+# Both the old, and new location are accepted by systemd 229 and up, so using the old location
+# to make them work for either version of systemd.
+StartLimitBurst=3
+
+# Note that StartLimitInterval was renamed to StartLimitIntervalSec in systemd 230.
+# Both the old, and new name are accepted by systemd 230 and up, so using the old name to make
+# this option work for either version of systemd.
+StartLimitInterval=60s
+
+# Having non-zero Limit*s causes performance problems due to accounting overhead
+# in the kernel. We recommend using cgroups to do container-local accounting.
+LimitNOFILE=infinity
+LimitNPROC=infinity
+LimitCORE=infinity
+
+# Comment TasksMax if your systemd version does not support it.
+# Only systemd 226 and above support this option.
+TasksMax=infinity
+
+# set delegate yes so that systemd does not reset the cgroups of docker containers
+Delegate=yes
+
+# kill only the docker process, not all processes in the cgroup
+KillMode=process
+OOMScoreAdjust=-500
+
+[Install]
+WantedBy=multi-user.target
+```
+
+在 ExecStart=/usr/bin/dockerd 后面直接添加 -H tcp://127.0.0.1:4243 -H unix:///var/run/docker.sock （注意端口 8088 自己随便定义，别跟当前的冲突即可）
+
+```
+$ systemctl daemon-reload
+$ systemctl restart docker
+```
+
+```
+$ curl -s http://127.0.0.1:4243/info | python2 -m json.tool
+```
+
+## 8.2 操作 docker API
+
+### 8.2.1 imasge 列表
+```
+$ curl -X GET http://127.0.0.1:4243/images/json
+```
+
+如
+```
+$ curl -s -X GET http://127.0.0.1:4243/images/json | python2 -m json.tool
+[
+    {
+        "Containers": -1,
+        "Created": 1693241633,
+        "Id": "sha256:c631b267fd9ee8bfc3a10bf88d4346be67556a89eec7ca2bde969e0d29a70918",
+        "Labels": null,
+        "ParentId": "",
+        "RepoDigests": [],
+        "RepoTags": [
+            "butterfly:1.1.20.21"
+        ],
+        "SharedSize": -1,
+        "Size": 76964781,
+        "VirtualSize": 76964781
+    }
+]
+```
+
+### 8.2.2 容器列表
+```
+$ docker run -d -p 8585:8585 --name butterfly_app butterfly:1.1.20.21
+
+$ curl -s -X GET http://127.0.0.1:4243/containers/json | python2 -m json.tool
+```
+
+> 如：
+```
+$ curl -s -X GET http://127.0.0.1:4243/containers/json | python2 -m json.tool
+[
+    {
+        "Command": "sh /opt/butterfly/run.sh docker_start",
+        "Created": 1693381603,
+        "HostConfig": {
+            "NetworkMode": "default"
+        },
+        "Id": "ac14ff31c0b850123ba5182ad75b96b162cc883a892eb230c67ef284a270c24e",
+        "Image": "butterfly:1.1.20.21",
+        "ImageID": "sha256:c631b267fd9ee8bfc3a10bf88d4346be67556a89eec7ca2bde969e0d29a70918",
+        "Labels": {},
+        "Mounts": [],
+        "Names": [
+            "/butterfly_app"
+        ],
+        "NetworkSettings": {
+            "Networks": {
+                "bridge": {
+                    "Aliases": null,
+                    "DriverOpts": null,
+                    "EndpointID": "c0aba0aeb8aad2daeee8bc93a8fea4c9f88233b98e86d992d85fd0259771767b",
+                    "Gateway": "172.17.0.1",
+                    "GlobalIPv6Address": "",
+                    "GlobalIPv6PrefixLen": 0,
+                    "IPAMConfig": null,
+                    "IPAddress": "172.17.0.2",
+                    "IPPrefixLen": 16,
+                    "IPv6Gateway": "",
+                    "Links": null,
+                    "MacAddress": "02:42:ac:11:00:02",
+                    "NetworkID": "87b9faf1e682e8fdd66a6dae40aa61d27375e569022a9549d2c71ee206d2c8b1"
+                }
+            }
+        },
+        "Ports": [
+            {
+                "IP": "0.0.0.0",
+                "PrivatePort": 8585,
+                "PublicPort": 8585,
+                "Type": "tcp"
+            },
+            {
+                "IP": "::",
+                "PrivatePort": 8585,
+                "PublicPort": 8585,
+                "Type": "tcp"
+            }
+        ],
+        "State": "running",
+        "Status": "Up 47 seconds"
+    }
+]
+```
+
+### 8.2.3 容器创建
+#### 8.2.3.1 端口映射
+
+```
+$ curl -X POST -H "Content-Type: application/json" -d '{
+    "Image": "butterfly:1.1.20.21",
+    "ExposedPorts": {
+        "8585/tcp": {}
+    },
+    "HostConfig": {
+        "PortBindings": {
+            "8585/tcp": [{"HostPort": "8000"}]
+        }
+    }
+}' http://127.0.0.1:4243/containers/create
+```
+
+> output
+```
+{"Id":"6337ff5a53831eaa062ac07717ee44d62f681bfcc9c617ee8f9ee5908f21c264","Warnings":[]}
+```
+> 备注
+```
+$ docker ps -a
+CONTAINER ID   IMAGE                 COMMAND                  CREATED              STATUS             PORTS                                       NAMES
+6337ff5a5383   butterfly:1.1.20.21   "sh /opt/butterfly/r…"   About a minute ago   Created                                                        priceless_chebyshev
+
+
+container 状态为 Created 状态，Docker 中的 created 状态表示该容器已被创建但还未启动。 您可以使用 docker start 命令来启动容器。
+此时的 PORTS 为空
+
+此时通过 docker inspect <container_id> 可以看到 {"NetworkSettings": {"Ports": {}}} 为 空 的状态
+```
+
+#### 8.2.3.2 磁盘映射
+
+```
+"HostConfig": {
+    "Binds": [
+        "/mnt/container/docker_bind/xxx:/mnt/data"
+    ]
+}
+```
+
+#### 8.2.3.3 指定 Entrypoint
+
+```
+// 启动 docker 内的 sshd
+"Entrypoint": ["/bin/bash", "-c", "/usr/sbin/sshd && while true;do sleep 10;done"]
+
+// Butterfly 启动
+"Entrypoint": ["sh", "/opt/butterfly/run.sh", "docker_start"]
+```
+
+### 8.2.4 容器操作
+```
+$ curl -X POST http://127.0.0.1:4243/containers/{id}/start      （注意这里是 POST 方法）
+$ curl -X POST http://127.0.0.1:4243/containers/{id}/stop       （注意这里是 POST 方法）
+$ curl -X POST http://127.0.0.1:4243/containers/{id}/restart    （注意这里是 POST 方法）
+```

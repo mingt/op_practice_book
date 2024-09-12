@@ -8,6 +8,7 @@
         * [1.2.2 写入量太大超出 output-buffer](#122-写入量太大超出-output-buffer)
         * [1.2.3 repl-backlog-size 太小导致失败](#123-repl-backlog-size-太小导致失败)
         * [1.2.4 主库磁盘故障](#124-主库磁盘故障)
+            * [主库磁盘异常示例记录](#主库磁盘异常示例记录)
     * [1.3 Redis bug](#13-redis-bug)
         * [1.3.1 AOF 句柄泄露 bug](#131-aof-句柄泄露-bug)
             * [表现](#表现)
@@ -17,8 +18,13 @@
             * [根因](#根因)
         * [1.3.3 redis slots 迁移的时候，永不过期的 key 因为 ttl>0 而过期，导致迁移丢失数据](#133-redis-slots-迁移的时候永不过期的-key-因为-ttl0-而过期导致迁移丢失数据)
             * [根因](#根因-1)
-    * [1.4 redis 日志](#14-redis-日志)
+        * [1.3.4 3.x 执行 exists 可以获取到，但 get 时则无法获取到数据](#134-3x-执行-exists-可以获取到但-get-时则无法获取到数据)
+            * [3.x exists 逻辑](#3x-exists-逻辑)
+            * [4.x exists 逻辑](#4x-exists-逻辑)
+        * [1.3.5 5.0 以前 redis 主从同步时因从库的 buffer 计算不准确导致主库大量的 key 被淘汰](#135-50-以前-redis-主从同步时因从库的-buffer-计算不准确导致主库大量的-key-被淘汰)
+    * [1.4 redis 日志及状态信息](#14-redis-日志及状态信息)
         * [1.4.1 日常日志](#141-日常日志)
+        * [1.4.2 info](#142-info)
     * [1.5 redis 协议说明](#15-redis-协议说明)
         * [1.5.1 网络层](#151-网络层)
         * [1.5.2 请求](#152-请求)
@@ -52,6 +58,11 @@
         * [1.6.11 以 Ziplist 编码的 Sorted Set](#1611-以-ziplist-编码的-sorted-set)
         * [1.6.12 Ziplist 编码的 Hashmap](#1612-ziplist-编码的-hashmap)
             * [CRC32 校验和](#crc32-校验和)
+    * [1.7 Redis 内存](#17-redis-内存)
+        * [1.7.1 used_memmory](#171-used_memmory)
+        * [1.7.2 used_memmory 会大于 maxmemory 吗？](#172-used_memmory-会大于-maxmemory-吗)
+    * [1.8 骚操作](#18-骚操作)
+        * [1.8.1 Redis 关闭过期自动删除策略](#181-redis-关闭过期自动删除策略)
 * [2 Redis twemproxy 集群](#2-redis-twemproxy-集群)
     * [2.1 Twemproxy 特性](#21-twemproxy-特性)
     * [2.2 环境说明](#22-环境说明)
@@ -100,6 +111,7 @@
     * [5.1 内核参数 overcommit](#51-内核参数-overcommit)
         * [什么是 Overcommit 和 OOM](#什么是-overcommit-和-oom)
     * [5.2 Redis CPU 100% 时分析](#52-redis-cpu-100-时分析)
+    * [5.3 Redis Cluster 集群出现 handshake 节点](#53-redis-cluster-集群出现-handshake-节点)
 * [6 数据迁移](#6-数据迁移)
     * [6.1 目标](#61-目标)
     * [6.2 怎么实现](#62-怎么实现)
@@ -121,6 +133,7 @@
     * [7.3 风险点](#73-风险点)
         * [7.3.1 无协议保障的 io 流程](#731-无协议保障的-io-流程)
         * [7.3.2 单线程带来的风险](#732-单线程带来的风险)
+        * [7.3.3 主从同步系数](#733-主从同步系数)
 
 <!-- vim-markdown-toc -->
 # 1 Redis
@@ -200,6 +213,30 @@ slave 出现如下类似日志，则同步已完成：
 [4611] 24 Aug 19:16:57.509 * MASTER <-> SLAVE sync: Loading DB in memory
 [4611] 24 Aug 19:19:44.191 * MASTER <-> SLAVE sync: Finished with success
 ```
+> 4.x 后的 redis 从库日志
+```
+13382:S 20 May 20:33:45.487 * SLAVE OF {master_ip}:{master_port} enabled (user request from 'id=3 addr={client_ip}:54054 fd=8 name= age=1 idle=0 flags=N db=0 sub=0 psub=0 multi=-1 qbuf=0 qbuf-free=32768 obl=0 oll=0 omem=0 events=r cmd=slaveof')
+13382:S 20 May 20:33:45.802 * Connecting to MASTER {master_ip}:{master_port}
+13382:S 20 May 20:33:45.802 * MASTER <-> SLAVE sync started
+13382:S 20 May 20:33:45.802 * Non blocking connect for SYNC fired the event.
+13382:S 20 May 20:33:45.802 * start send sync cmd :PING        # 如果 master 没有返回异常，而是返回 pong，则说明 master 可用
+                                                               # 如果 Redis 设置了密码，slave 会发送 auth $masterauth 指令，进行鉴权。
+
+13382:S 20 May 20:33:45.802 * Master replied to PING, replication can continue...
+13382:S 20 May 20:33:45.802 * start send sync cmd :REPLCONF listening-port 2051    # 从库通过 replconf 发送自己的端口及 IP 给 master。
+
+13382:S 20 May 20:33:45.802 * start send sync cmd :REPLCONF capa eof capa psync2   # slave 通过 replconf 发送 capa eof capa psync2 进行复制版本校验
+
+13382:S 20 May 20:33:45.802 * Partial resynchronization(mem) not possible (no cached master)
+13382:S 20 May 20:33:45.802 * start send sync cmd :PSYNC ? -1                      # 从库接下来就通过 psync 将自己的复制 id、复制偏移发送给 master，正式开始准备数据同步
+
+13382:S 20 May 20:33:45.882 * Full resync from master: 3abf1447d61679bf3b83c1e3b8f6402446ab0d6b:0
+13382:S 20 May 20:34:02.574 * MASTER <-> SLAVE sync: receiving 736712380 bytes from master
+13382:S 20 May 20:34:04.306 * MASTER <-> SLAVE sync: Flushing old data
+13382:S 20 May 20:34:04.306 * MASTER <-> SLAVE sync: Loading DB in memory
+13382:S 20 May 20:34:11.706 * MASTER <-> SLAVE sync: Finished with success
+13382:S 20 May 20:34:13.118 * SLAVE OF would result into synchronization with the master we are already connected with. No operation performed.
+```
 ### 1.2.1 repl-timeout
 若 slave 日志出现如下行：
 ```
@@ -231,11 +268,26 @@ client-output-buffer-limit slave 256mb 64mb 60
 
 当 master-slave 复制连接断开，server 端会释放连接相关的数据结构。replication buffer 中的数据也就丢失，当断开的 slave 重新连接上 master 的时候，slave 将会发送 psync 命令（包含复制的偏移量 offset），请求 partial resync。如果请求的 offset 不存在，那么执行全量的 sync 操作，相当于重新建立主从复制。
 
+> 主库日志
 ```
+[16250] 26 Jul 22:59:13.921 # replication.c: 519 psync_offset:11198236363343 repl_backlog_off:11199960061969 repl_backlog_histlen:104857600
+[16250] 26 Jul 22:59:13.921 * replication.c: 526 Unable to partial resync with the slave for lack of backlog (Slave request was: 11198236363343).
+
+or
+
 Unable to partial resync with slave $slaveip:6379 for lack of backlog (Slave request was: 5974421660).
 ```
 调整 repl-backlog-size 大小
 
+> 个人觉得
+```
+repl-backlog-size[配置] > client-output-buffer-limit[slave 配置 2G]
+
+
+比如主从同步时，从库在加载 rdb 时，有大 key，或者增量数据大于 client-output-buffer-limit 时，主库主动与从库主动断开连接时
+
+从库在加载完 rdb 时，再请求增量数据时，可以从 repl-backlog 中找到数据
+```
 ### 1.2.4 主库磁盘故障
 
 触发全量同步时，主库磁盘故障，主库 RDB 无法落盘，导致全量同步失败
@@ -251,6 +303,46 @@ Unable to partial resync with slave $slaveip:6379 for lack of backlog (Slave req
 对 master 进行操作
 config set repl-diskless-sync yes
 ```
+#### 主库磁盘异常示例记录
+> 新增从库(4.0.10 版本), 从库日志
+```
+13475:S 13 May 05:51:08.134 * Connecting to MASTER {Master IP}:{Master port}
+13475:S 13 May 05:51:08.135 * MASTER <-> SLAVE sync started
+13475:S 13 May 05:51:08.135 * Non blocking connect for SYNC fired the event.
+13475:S 13 May 05:51:08.135 * start send sync cmd :PING
+
+13475:S 13 May 05:51:08.135 * Master replied to PING, replication can continue...
+13475:S 13 May 05:51:08.135 * start send sync cmd :REPLCONF listening-port 2019
+
+13475:S 13 May 05:51:08.135 * start send sync cmd :REPLCONF capa eof capa psync2
+
+13475:S 13 May 05:51:08.135 * Partial resynchronization(mem) not possible (no cached master)
+13475:S 13 May 05:51:08.135 * start send sync cmd :PSYNC ? -1
+
+13475:S 13 May 05:51:08.196 * Full resync from master: 7f0c1af873f9704ef0a55357ea8dc2a9bf89b7a9:0
+13475:S 13 May 05:51:08.399 # I/O error reading bulk count from MASTER: Resource temporarily unavailable
+```
+> 修改为无盘复制后从库日志
+```
+13475:S 13 May 06:37:56.103 * Connecting to MASTER {Master IP}:{Master port}
+13475:S 13 May 06:37:56.103 * MASTER <-> SLAVE sync started
+13475:S 13 May 06:37:56.103 * Non blocking connect for SYNC fired the event.
+13475:S 13 May 06:37:56.103 * start send sync cmd :PING
+
+13475:S 13 May 06:37:56.103 * Master replied to PING, replication can continue...
+13475:S 13 May 06:37:56.103 * start send sync cmd :REPLCONF listening-port 2019
+
+13475:S 13 May 06:37:56.103 * start send sync cmd :REPLCONF capa eof capa psync2
+
+13475:S 13 May 06:37:56.104 * Partial resynchronization(mem) not possible (no cached master)
+13475:S 13 May 06:37:56.104 * start send sync cmd :PSYNC ? -1
+
+13475:S 13 May 06:38:02.777 * Full resync from master: 7f0c1af873f9704ef0a55357ea8dc2a9bf89b7a9:659176439
+13475:S 13 May 06:38:02.846 * MASTER <-> SLAVE sync: receiving streamed RDB from master        // 从这里看已经是无盘复制模式
+13475:S 13 May 06:38:03.256 # I/O error trying to sync with MASTER: connection lost
+```
+
+//todo
 
 ## 1.3 Redis bug
 
@@ -442,8 +534,108 @@ void migrateCommand(client *c) {
             serverAssertWithInfo(c,NULL,rioWriteBulkString(&cmd,"REPLACE",7));
     }
 ```
+### 1.3.4 3.x 执行 exists 可以获取到，但 get 时则无法获取到数据
 
-## 1.4 redis 日志
+#### 3.x exists 逻辑
+> exists
+```
+redis.c:    {"exists",existsCommand,-2,"rF",0,NULL,1,-1,1,0,0}
+```
+
+> db.c:void existsCommand
+```
+// EXISTS key1 key2 ... key_N.  Return value is the number of keys existing.
+void existsCommand(redisClient *c) {
+    long long count = 0;
+    int j;
+
+    for (j = 1; j < c->argc; j++) {
+        expireIfNeeded(c->db,c->argv[j]);
+        if (dbExists(c->db,c->argv[j])) count++;
+    }
+    addReplyLongLong(c,count);
+}
+```
+
+在从库上执行 exists 时，3.x 版本先执行的 expireIfNeeded ，在从库时不会进行主动淘汰，然后进行判断此 key 是否存在
+
+#### 4.x exists 逻辑
+
+> db.c:void existsCommand
+```
+/*/EXISTS key1 key2 ... key_N. Return value is the number of keys existing.
+void existsCommand(client *c) {
+    long long count = 0;
+    int j;
+
+    for (j = 1; j < c->argc; j++) {
+        if (lookupKeyRead(c->db,c->argv[j])) count++;
+    }
+    addReplyLongLong(c,count);
+}
+```
+
+> db.c:lookupKeyRead
+```
+robj *lookupKeyReadWithFlags(redisDb *db, robj *key, int flags) {
+    robj *val;
+
+    if (expireIfNeeded(db,key) == 1) {
+        /* Key expired. If we are in the context of a master, expireIfNeeded()
+         * returns 0 only when the key does not exist at all, so it's safe
+         * to return NULL ASAP. */
+        if (server.masterhost == NULL) return NULL;
+
+        /* However if we are in the context of a slave, expireIfNeeded() will
+         * not really try to expire the key, it only returns information
+         * about the "logical" status of the key: key expiring is up to the
+         * master in order to have a consistent view of master's data set.
+         *
+         * However, if the command caller is not the master, and as additional
+         * safety measure, the command invoked is a read-only command, we can
+         * safely return NULL here, and provide a more consistent behavior
+         * to clients accessign expired values in a read-only fashion, that
+         * will say the key as non exisitng.
+         *
+         * Notably this covers GETs when slaves are used to scale reads. */
+        if (server.current_client &&
+            server.current_client != server.master &&
+            server.current_client->cmd &&
+            server.current_client->cmd->flags & CMD_READONLY)
+        {
+            return NULL;
+        }
+    }
+    val = lookupKey(db,key,flags);
+    if (val == NULL)
+        server.stat_keyspace_misses++;
+    else
+        server.stat_keyspace_hits++;
+    return val;
+}
+
+/* Like lookupKeyReadWithFlags(), but does not use any flag, which is the
+ * common case. */
+robj *lookupKeyRead(redisDb *db, robj *key) {
+    return lookupKeyReadWithFlags(db,key,LOOKUP_NONE);
+}
+```
+
+### 1.3.5 5.0 以前 redis 主从同步时因从库的 buffer 计算不准确导致主库大量的 key 被淘汰
+
+https://github.com/redis/redis/commit/bf680b6f8cdaee2c5588c5c8932a7f3b7fa70b15
+
+```
+当写入新数据时，会判断是否 used_memmory > maxmemory，这里会刨除从库的 client-output-buffer
+
+而 5.0 以前在计算从库 buffer 有误
+
+```
+比如需要刨除 1GB 空间，结果只是刨除了 500MB, 这个时候主库需要额外淘汰 500MB 数据，这 500MB 又会放到从库的 client-output-buffer ，形成了个恶性循环
+```
+
+```
+## 1.4 redis 日志及状态信息
 
 ### 1.4.1 日常日志
 ```
@@ -454,6 +646,16 @@ DB 0: 1 keys (0 volatile) in 4 slots HT
 > * 0 volatile: 目前 0 号 DB 中没有 volatile key，volatile key 的意思是 过特定的时间就被 REDIS 自动删除，在做缓存时有用。
 > * 4 slots HT: 目前 0 号 DB 的 hash table 只有 4 个 slots(buckets)
 >   * //todo
+
+### 1.4.2 info
+
+redis键空间的状态监控
+
+> * 键个数 (keys): redis 实例包含的键个数
+> * 设置有生存时间的键个数 (keys_expires): 是纯缓存或业务的过期长，都建议对键设置 TTL; 避免业务的死键问题. （expires 字段）
+> * 估算设置生存时间键的平均寿命 (avg_ttl): redis 会抽样估算实例中设置TTL键的平均时长，单位毫秒。如果无 TTL 键或在 Slave 则 avg_ttl 一直为 0
+> * LRU淘汰的键个数 (evicted_keys): 因 used_memory 达到 maxmemory 限制，并设置有淘汰策略的实例；（对排查问题重要，可不设置告警）
+> * 过期淘汰的键个数 (expired_keys): 删除生存时间为 0 的键个数；包含主动删除和定期删除的个数。
 
 ## 1.5 redis 协议说明
 
@@ -1109,6 +1311,245 @@ ziplist 的每个条目有下面的格式：
 
 当校验和被作废时，这个字段将是 `0`。
 
+## 1.7 Redis 内存
+
+### 1.7.1 used_memmory
+
+```
+               /-------> 自身内存
++------------+
+|used_memmory| --------> 对象内存
++------------+
+               \-------> 缓冲碎片（客户端缓冲，复制积压缓冲区，AOF 缓冲区）
+
+
+used_memmory_rss - used_memmory = 内存碎片
+```
+
+PS: 当集群容量满的时候，如果调整 repl-backlog-size , 会触发淘汰，导致业务请求阻塞 , :( 这个引发过 case
+
+### 1.7.2 used_memmory 会大于 maxmemory 吗？
+
+设置了 Maxmemory 的话，Redis 服务器每执行一个命令，都会检测内存，判断是否需要进行数据淘汰
+
+> 执行命令
+```
+/*src/redis.cprocessCommand*/
+int processCommand(redisClient *c) {
+        ......
+        // 内存超额
+        /* Handle the maxmemory directive.
+        **
+        First we try to free some memory if possible (if there are volatile
+        * keys in the dataset). If there are not the only thing we can do
+        * is returning an error. */
+        if (server.maxmemory) {
+                int retval = freeMemoryIfNeeded();
+        if ((c->cmd->flags & REDIS_CMD_DENYOOM) && retval == REDIS_ERR) {
+                flagTransaction(c);
+                addReply(c, shared.oomerr);
+                return REDIS_OK;
+        }
+    }
+    ......
+}
+```
+
+> freeMemoryIfNeeded 函数
+```
+int freeMemoryIfNeeded(void) {
+    size_t mem_used, mem_tofree, mem_freed;
+    int slaves = listLength(server.slaves);
+
+    /* Remove the size of slaves output buffers and AOF buffer from the
+     * count of used memory. */
+    // 计算出 Redis 目前占用的内存总数，但有两个方面的内存不会计算在内：
+    // 1）从服务器的输出缓冲区的内存
+    // 2）AOF 缓冲区的内存
+    mem_used = zmalloc_used_memory();
+    if (slaves) {
+        listIter li;
+        listNode *ln;
+
+        listRewind(server.slaves,&li);
+        while((ln = listNext(&li))) {
+            redisClient *slave = listNodeValue(ln);
+            unsigned long obuf_bytes = getClientOutputBufferMemoryUsage(slave);
+            if (obuf_bytes > mem_used)
+                mem_used = 0;
+            else
+                mem_used -= obuf_bytes;
+        }
+    }
+    if (server.aof_state != REDIS_AOF_OFF) {
+        mem_used -= sdslen(server.aof_buf);
+        mem_used -= aofRewriteBufferSize();
+    }
+
+    /* Check if we are over the memory limit. */
+    // 如果目前使用的内存大小比设置的 maxmemory 要小，那么无须执行进一步操作
+    if (mem_used <= server.maxmemory) return REDIS_OK;
+
+    // 如果占用内存比 maxmemory 要大，但是 maxmemory 策略为不淘汰，那么直接返回
+    if (server.maxmemory_policy == REDIS_MAXMEMORY_NO_EVICTION)
+        return REDIS_ERR; /* We need to free memory, but policy forbids. */
+
+    /* Compute how much memory we need to free. */
+    // 计算需要释放多少字节的内存
+    mem_tofree = mem_used - server.maxmemory;
+
+    // 初始化已释放内存的字节数为 0
+    mem_freed = 0;
+
+    // 根据 maxmemory 策略，
+    // 遍历字典，释放内存并记录被释放内存的字节数
+    while (mem_freed < mem_tofree) {
+        int j, k, keys_freed = 0;
+
+        // 遍历所有字典
+        for (j = 0; j < server.dbnum; j++) {
+            long bestval = 0; /* just to prevent warning */
+            sds bestkey = NULL;
+            dictEntry *de;
+            redisDb *db = server.db+j;
+            dict *dict;
+
+            if (server.maxmemory_policy == REDIS_MAXMEMORY_ALLKEYS_LRU ||
+                server.maxmemory_policy == REDIS_MAXMEMORY_ALLKEYS_RANDOM)
+            {
+                // 如果策略是 allkeys-lru 或者 allkeys-random
+                // 那么淘汰的目标为所有数据库键
+                dict = server.db[j].dict;
+            } else {
+                // 如果策略是 volatile-lru 、 volatile-random 或者 volatile-ttl
+                // 那么淘汰的目标为带过期时间的数据库键
+                dict = server.db[j].expires;
+            }
+
+            // 跳过空字典
+            if (dictSize(dict) == 0) continue;
+
+            /* volatile-random and allkeys-random policy */
+            // 如果使用的是随机策略，那么从目标字典中随机选出键
+            if (server.maxmemory_policy == REDIS_MAXMEMORY_ALLKEYS_RANDOM ||
+                server.maxmemory_policy == REDIS_MAXMEMORY_VOLATILE_RANDOM)
+            {
+                de = dictGetRandomKey(dict);
+                bestkey = dictGetKey(de);
+            }
+
+            /* volatile-lru and allkeys-lru policy */
+            // 如果使用的是 LRU 策略，
+            // 那么从一集 sample 键中选出 IDLE 时间最长的那个键
+            else if (server.maxmemory_policy == REDIS_MAXMEMORY_ALLKEYS_LRU ||
+                server.maxmemory_policy == REDIS_MAXMEMORY_VOLATILE_LRU)
+            {
+                struct evictionPoolEntry *pool = db->eviction_pool;
+
+                while(bestkey == NULL) {
+                    // 随机取一集键值对
+                    evictionPoolPopulate(dict, db->dict, db->eviction_pool);
+                    /* Go backward from best to worst element to evict. */
+                    for (k = REDIS_EVICTION_POOL_SIZE-1; k >= 0; k--) {
+                        if (pool[k].key == NULL) continue;
+                        de = dictFind(dict,pool[k].key);
+
+                        /* Remove the entry from the pool. */
+                        sdsfree(pool[k].key);
+                        /* Shift all elements on its right to left. */
+                        memmove(pool+k,pool+k+1,
+                            sizeof(pool[0])*(REDIS_EVICTION_POOL_SIZE-k-1));
+                        /* Clear the element on the right which is empty
+                         * since we shifted one position to the left.  */
+                        pool[REDIS_EVICTION_POOL_SIZE-1].key = NULL;
+                        pool[REDIS_EVICTION_POOL_SIZE-1].idle = 0;
+
+                        /* If the key exists, is our pick. Otherwise it is
+                         * a ghost and we need to try the next element. */
+                        if (de) {
+                            bestkey = dictGetKey(de);
+                            break;
+                        } else {
+                            /* Ghost... */
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            /* volatile-ttl */
+            // 策略为 volatile-ttl ，从一集 sample 键中选出过期时间距离当前时间最接近的键
+            else if (server.maxmemory_policy == REDIS_MAXMEMORY_VOLATILE_TTL) {
+                for (k = 0; k < server.maxmemory_samples; k++) {
+                    sds thiskey;
+                    long thisval;
+
+                    de = dictGetRandomKey(dict);
+                    thiskey = dictGetKey(de);
+                    thisval = (long) dictGetVal(de);
+
+                    /* Expire sooner (minor expire unix timestamp) is better
+                     * candidate for deletion */
+                    if (bestkey == NULL || thisval < bestval) {
+                        bestkey = thiskey;
+                        bestval = thisval;
+                    }
+                }
+            }
+
+            /* Finally remove the selected key. */
+            // 删除被选中的键
+            if (bestkey) {
+                long long delta;
+
+                robj *keyobj = createStringObject(bestkey,sdslen(bestkey));
+                propagateExpire(db,keyobj);
+                /* We compute the amount of memory freed by dbDelete() alone.
+                 * It is possible that actually the memory needed to propagate
+                 * the DEL in AOF and replication link is greater than the one
+                 * we are freeing removing the key, but we can't account for
+                 * that otherwise we would never exit the loop.
+                 *
+                 * AOF and Output buffer memory will be freed eventually so
+                 * we only care about memory used by the key space. */
+                // 计算删除键所释放的内存数量
+                delta = (long long) zmalloc_used_memory();
+                dbDelete(db,keyobj);
+                delta -= (long long) zmalloc_used_memory();
+                mem_freed += delta;
+
+                // 对淘汰键的计数器增一
+                server.stat_evictedkeys++;
+
+                notifyKeyspaceEvent(REDIS_NOTIFY_EVICTED, "evicted",
+                    keyobj, db->id);
+                decrRefCount(keyobj);
+                keys_freed++;
+
+                /* When the memory to free starts to be big enough, we may
+                 * start spending so much time here that is impossible to
+                 * deliver data to the slaves fast enough, so we force the
+                 * transmission here inside the loop. */
+                if (slaves) flushSlavesOutputBuffers();
+            }
+        }
+
+        if (!keys_freed) return REDIS_ERR; /* nothing to free... */
+    }
+
+    return REDIS_OK;
+}
+```
+
+## 1.8 骚操作
+
+### 1.8.1 Redis 关闭过期自动删除策略
+
+```
+debug set-active-expire 0
+
+设置为 1 时恢复自动删除策略
+```
 
 # 2 Redis twemproxy 集群
 
@@ -1904,6 +2345,46 @@ Linux 对大部分申请内存的请求都回复"yes"，以便能跑更多更大
 ```
 $perf top -p 28764
 ```
+## 5.3 Redis Cluster 集群出现 handshake 节点
+
+> 获取整个集群的 ip:port
+```
+不能有遗漏，否则如果对应的 node 还保存在 handshake 节点信息的话，会一直进行广播
+```
+> 对所有的 node 进行 ping 探测
+```
+检查集群中的 node 是否因为连接数满等情况导致无法连接
+```
+> 对说有 node 进行下发 forget 命令(可执行多次)
+```
+# Function
+function print_info() {
+    echo "$(date +%Y%m%d-%H%M%S) $@"
+}
+
+function redis_cluster_forget_fail() {
+    local ip_port=$1
+    local ip_=`echo ${ip_port} | awk -F':' '{print $1}'`
+    local port_=`echo ${ip_port} | awk -F':' '{print $2}'`
+
+    redis-cli -h ${ip_} -p ${port_} cluster nodes | sed 's/\\n/\n/g' \
+    | egrep -i 'hands|fail' | awk '{print $1}' \
+    | while read line;do
+        print_info "forget fail_or_hand redis-cli -h ${ip_} -p ${port_} cluster forget $line"
+        redis-cli -h ${ip_} -p ${port_} cluster forget $line &
+    done
+}
+
+for _ip_port in `cat ${list_ipport}`;do
+    redis_cluster_forget_fail ${_ip_port} &
+done
+```
+> 关闭未关闭的 redis-cli
+```
+问题解决完后，可能还有很多 redis-cli 卡住
+
+ps -ef | grep redis-cli | awk '{print $2}' | xargs kill -15
+```
 
 # 6 数据迁移
 
@@ -2124,3 +2605,22 @@ redis 使用单线程无锁设计，这样做的好处是能够最大限度的�
 缺陷是当一个请求操作比较重，耗时较长时，会将当前 redis 实例负责的所有请求都阻塞一小段时间，主线程阻塞甚至会影响主从探活
 
 因此线上命令需要严格控制，避免发生长时间线程阻塞的慢请求
+
+### 7.3.3 主从同步系数
+
+> 定义
+```
+同步系数 = 单分片已用空间（GB）* 写入流量(MB/s)
+```
+
+> 约束
+```
+Redis主库写入量大或者网络抖动时会出现主从同步中断的情况，此时从库会重新连接主库同步全量数据。
+主库同步全量数据给从库时需要先dump出当前内存的镜像发送给从库，同时还要承担分片的读写流量，这会导致主库负载过高。
+
+全量同步时请求处理耗时变长，触发业务超时，此时业务侧如果有重试风暴会使故障进一步恶化。
+主从同步时受内存buffer限制，如果在同步过程中写入量超过buffer时需要重新开始进行全量同步。经过实际测算，若使用量为5GB的实例，写入带宽超过10MB/s时主从同步无法追上；如果缓存数据量达到10GB时，写入带宽超过5MB/s时主从同步无法追上。
+
+因此业务侧需要保证：单分片已用空间（GB）* 写入流量(MB/s) < 50 的安全系数
+```
+
